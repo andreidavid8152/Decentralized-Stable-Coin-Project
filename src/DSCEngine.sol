@@ -36,6 +36,8 @@ contract DSCEngine is ReentrancyGuard {
     error DSCEngine_MintFailed();
     error DSCEngine__HealthFactorOk();
     error DSCEngine__HealthFactorNotImproved();
+    error DSCEngine__NotEnoughCollateral();
+    error DSCEngine__NotEnoughMinted();
 
     //////////////////
     // State Variables
@@ -77,6 +79,20 @@ contract DSCEngine is ReentrancyGuard {
     modifier isAllowedToken(address token) {
         if (sPriceFeeds[token] == address(0)) {
             revert DSCEngine__NotAllowedToken();
+        }
+        _;
+    }
+
+    modifier enoughCollateral(uint256 amount, address user, address token) {
+        if (sCollateralDeposited[user][token] < amount) {
+            revert DSCEngine__NotEnoughCollateral();
+        }
+        _;
+    }
+
+    modifier enoughMinted(uint256 amount, address user) {
+        if (sDSCMinted[user] < amount) {
+            revert DSCEngine__NotEnoughMinted();
         }
         _;
     }
@@ -215,10 +231,10 @@ contract DSCEngine is ReentrancyGuard {
 
         uint256 totalCollateralToRedeem = tokenAmountFromDebtCovered + bonusCollateral;
         _redeemCollateral(user, msg.sender, collateral, totalCollateralToRedeem);
-        _burnDsc(debtToCover, user,msg.sender );
+        _burnDsc(debtToCover, user, msg.sender);
 
         uint256 endingUserHealthFactor = _healthFactor(user);
-        if(endingUserHealthFactor <= startingUserHealthFactor) {
+        if (endingUserHealthFactor <= startingUserHealthFactor) {
             revert DSCEngine__HealthFactorNotImproved();
         }
         _revertIfHealthFactorIsBroken(msg.sender);
@@ -232,19 +248,23 @@ contract DSCEngine is ReentrancyGuard {
 
     /*
      * @dev Low-level internal function, do not call unless the function calling it is
-     * checking for health factors being broken 
+     * checking for health factors being broken
      */
-    function _burnDsc(uint256 amountDscToBurn, address onBehalfOf, address dscFrom) private {
+    function _burnDsc(uint256 amountDscToBurn, address onBehalfOf, address dscFrom)
+        private
+        enoughMinted(amountDscToBurn, onBehalfOf)
+    {
         sDSCMinted[onBehalfOf] -= amountDscToBurn;
         bool success = I_DSC.transferFrom(dscFrom, address(this), amountDscToBurn);
         if (!success) {
             revert DSCEngine__TransferFailed();
-        }
+        } 
         I_DSC.burn(amountDscToBurn);
     }
 
     function _redeemCollateral(address from, address to, address tokenCollateralAddress, uint256 amountCollateral)
         private
+        enoughCollateral(amountCollateral, from, tokenCollateralAddress)
     {
         sCollateralDeposited[from][tokenCollateralAddress] -= amountCollateral;
         emit CollateralRedeemed(from, to, tokenCollateralAddress, amountCollateral);
@@ -271,6 +291,10 @@ contract DSCEngine is ReentrancyGuard {
         // total DSC minted
         // total collateral VALUE
         (uint256 totalDscMinted, uint256 collateralValueInUsd) = _getAccountInformation(user);
+
+        // SI EL USUARIO NO TIENE DEUDA, SU SALUD ES INFINITA
+        if (totalDscMinted == 0) return type(uint256).max; 
+
         uint256 collateralAdjustedForThreshold = (collateralValueInUsd * LIQUIDATION_THRESHOLD) / LIQUIDATION_PRECISION;
         return (collateralAdjustedForThreshold * PRECISION) / totalDscMinted;
     }
@@ -312,11 +336,15 @@ contract DSCEngine is ReentrancyGuard {
         return ((uint256(price) * ADDITIONAL_FEED_PRECISION) * amount) / PRECISION;
     }
 
-    function getAccountInformation(address user) external view returns (uint256 totalDscMinted, uint256 collateralValueInUsd) {
+    function getAccountInformation(address user)
+        external
+        view
+        returns (uint256 totalDscMinted, uint256 collateralValueInUsd)
+    {
         (totalDscMinted, collateralValueInUsd) = _getAccountInformation(user);
     }
 
-    function getPriceFeed(address token) external view returns (address){
+    function getPriceFeed(address token) external view returns (address) {
         return sPriceFeeds[token];
     }
 
@@ -324,7 +352,11 @@ contract DSCEngine is ReentrancyGuard {
         return sCollateralTokens[index];
     }
 
-    function getAddressDSC() external view returns (address){
+    function getAddressDSC() external view returns (address) {
         return address(I_DSC);
+    }
+
+    function getDscMinted(address user) external view returns (uint256) {
+        return sDSCMinted[user];
     }
 }
